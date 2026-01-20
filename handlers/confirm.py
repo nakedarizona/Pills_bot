@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
@@ -18,7 +18,6 @@ async def confirm_taken(callback: CallbackQuery):
         return
 
     # Verify ownership through schedule -> pill -> user chain
-    from database import get_pill, get_user
     import aiosqlite
     from config import DB_PATH
 
@@ -26,7 +25,7 @@ async def confirm_taken(callback: CallbackQuery):
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute(
             """
-            SELECT u.telegram_id, p.name, p.dosage
+            SELECT u.telegram_id, p.name, p.dosage, s.frequency, s.id as schedule_id
             FROM schedules s
             JOIN pills p ON s.pill_id = p.id
             JOIN users u ON p.user_id = u.id
@@ -45,12 +44,31 @@ async def confirm_taken(callback: CallbackQuery):
         return
 
     await db.update_intake_status(log_id, "taken", datetime.now())
+
+    # For interval-based schedules, update start_date to today
+    # so the next reminder will be after interval_days from today
+    if row["frequency"] == "interval":
+        today_str = date.today().isoformat()
+        await db.update_schedule_start_date(row["schedule_id"], today_str)
+
     await callback.answer("Отлично! Отмечено как выпито.")
 
-    await callback.message.edit_text(
-        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-        f"Выпито в {datetime.now().strftime('%H:%M')}"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+            f"✅ Выпито в {datetime.now().strftime('%H:%M')}",
+            parse_mode="HTML",
+        )
+    except:
+        # Message might have photo, try edit_caption
+        try:
+            await callback.message.edit_caption(
+                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                f"✅ Выпито в {datetime.now().strftime('%H:%M')}",
+                parse_mode="HTML",
+            )
+        except:
+            pass
 
 
 @router.callback_query(F.data.startswith("missed_"))
@@ -91,15 +109,81 @@ async def confirm_missed(callback: CallbackQuery):
     await db.update_intake_status(log_id, "missed")
     await callback.answer("Отмечено как пропущено.")
 
-    await callback.message.edit_text(
-        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-        f"Пропущено"
-    )
+    try:
+        await callback.message.edit_text(
+            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+            f"❌ Пропущено",
+            parse_mode="HTML",
+        )
+    except:
+        try:
+            await callback.message.edit_caption(
+                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                f"❌ Пропущено",
+                parse_mode="HTML",
+            )
+        except:
+            pass
+
+
+@router.callback_query(F.data.startswith("not_taken_"))
+async def not_taken_yet(callback: CallbackQuery):
+    """User says they haven't taken the pill yet - will be reminded later."""
+    log_id = int(callback.data.replace("not_taken_", ""))
+
+    log = await db.get_intake_log(log_id)
+    if not log:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+
+    import aiosqlite
+    from config import DB_PATH
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            """
+            SELECT u.telegram_id, p.name, p.dosage
+            FROM schedules s
+            JOIN pills p ON s.pill_id = p.id
+            JOIN users u ON p.user_id = u.id
+            WHERE s.id = ?
+            """,
+            (log.schedule_id,),
+        )
+        row = await cursor.fetchone()
+
+    if not row or row["telegram_id"] != callback.from_user.id:
+        await callback.answer("Это не твоя таблетка!", show_alert=True)
+        return
+
+    if log.status != "pending":
+        await callback.answer("Статус уже изменён!")
+        return
+
+    # Keep status as pending, the scheduler will send follow-up reminders
+    await callback.answer("Хорошо, напомню позже!")
+
+    try:
+        await callback.message.edit_text(
+            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+            f"⏳ Напомню через 3 часа (до 21:00)",
+            parse_mode="HTML",
+        )
+    except:
+        try:
+            await callback.message.edit_caption(
+                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                f"⏳ Напомню через 3 часа (до 21:00)",
+                parse_mode="HTML",
+            )
+        except:
+            pass
 
 
 @router.callback_query(F.data.startswith("remind_later_"))
 async def remind_later(callback: CallbackQuery):
-    """Remind again in 30 minutes."""
+    """Legacy handler - remind again later."""
     log_id = int(callback.data.replace("remind_later_", ""))
 
     log = await db.get_intake_log(log_id)
@@ -128,5 +212,5 @@ async def remind_later(callback: CallbackQuery):
         await callback.answer("Это не твоя таблетка!", show_alert=True)
         return
 
-    await callback.answer("Напомню через 30 минут!")
+    await callback.answer("Напомню позже!")
     await callback.message.edit_reply_markup(reply_markup=None)

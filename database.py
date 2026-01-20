@@ -39,10 +39,27 @@ async def init_db():
                 pill_id INTEGER NOT NULL,
                 time TEXT NOT NULL,
                 days TEXT NOT NULL,
+                frequency TEXT DEFAULT 'daily',
+                interval_days INTEGER DEFAULT 1,
+                start_date TEXT,
                 is_active BOOLEAN DEFAULT 1,
                 FOREIGN KEY (pill_id) REFERENCES pills (id) ON DELETE CASCADE
             )
         """)
+
+        # Add new columns if they don't exist (migration)
+        try:
+            await db.execute("ALTER TABLE schedules ADD COLUMN frequency TEXT DEFAULT 'daily'")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE schedules ADD COLUMN interval_days INTEGER DEFAULT 1")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE schedules ADD COLUMN start_date TEXT")
+        except:
+            pass
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS intake_logs (
@@ -51,9 +68,21 @@ async def init_db():
                 scheduled_time DATETIME NOT NULL,
                 taken_at DATETIME,
                 status TEXT DEFAULT 'pending',
+                reminder_count INTEGER DEFAULT 0,
+                last_reminder_at DATETIME,
                 FOREIGN KEY (schedule_id) REFERENCES schedules (id) ON DELETE CASCADE
             )
         """)
+
+        # Add new columns if they don't exist (migration for intake_logs)
+        try:
+            await db.execute("ALTER TABLE intake_logs ADD COLUMN reminder_count INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE intake_logs ADD COLUMN last_reminder_at DATETIME")
+        except:
+            pass
 
         await db.commit()
 
@@ -231,19 +260,38 @@ async def update_pill(
 
 # Schedule operations
 async def add_schedule(
-    pill_id: int, time: str, days: list[int]
+    pill_id: int,
+    time: str,
+    days: list[int],
+    frequency: str = "daily",
+    interval_days: int = 1,
+    start_date: Optional[str] = None,
 ) -> Schedule:
-    """Add a schedule for a pill."""
+    """Add a schedule for a pill.
+
+    frequency: daily, weekly, monthly, interval, specific_days
+    interval_days: used when frequency is 'interval' (e.g., every 2 days)
+    start_date: reference date for interval calculations
+    """
+    if start_date is None:
+        start_date = date.today().isoformat()
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            """INSERT INTO schedules (pill_id, time, days)
-               VALUES (?, ?, ?)""",
-            (pill_id, time, json.dumps(days)),
+            """INSERT INTO schedules (pill_id, time, days, frequency, interval_days, start_date)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (pill_id, time, json.dumps(days), frequency, interval_days, start_date),
         )
         await db.commit()
 
         return Schedule(
-            id=cursor.lastrowid, pill_id=pill_id, time=time, days=days
+            id=cursor.lastrowid,
+            pill_id=pill_id,
+            time=time,
+            days=days,
+            frequency=frequency,
+            interval_days=interval_days,
+            start_date=start_date,
         )
 
 
@@ -263,14 +311,20 @@ async def get_pill_schedules(pill_id: int) -> list[Schedule]:
                 pill_id=row["pill_id"],
                 time=row["time"],
                 days=json.loads(row["days"]),
+                frequency=row["frequency"] or "daily",
+                interval_days=row["interval_days"] or 1,
+                start_date=row["start_date"],
                 is_active=bool(row["is_active"]),
             )
             for row in rows
         ]
 
 
-async def get_schedules_for_time(time_str: str, day_of_week: int) -> list[dict]:
-    """Get all active schedules for a specific time and day."""
+async def get_schedules_for_time(time_str: str, current_date: date) -> list[dict]:
+    """Get all active schedules for a specific time and date."""
+    day_of_week = current_date.isoweekday()
+    day_of_month = current_date.day
+
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -288,9 +342,31 @@ async def get_schedules_for_time(time_str: str, day_of_week: int) -> list[dict]:
 
         result = []
         for row in rows:
+            row_dict = dict(row)
             days = json.loads(row["days"])
-            if day_of_week in days:
-                result.append(dict(row))
+            frequency = row["frequency"] or "daily"
+            interval_days = row["interval_days"] or 1
+            start_date_str = row["start_date"]
+
+            should_remind = False
+
+            if frequency == "daily":
+                should_remind = True
+            elif frequency == "weekly" or frequency == "specific_days":
+                should_remind = day_of_week in days
+            elif frequency == "monthly":
+                should_remind = day_of_month in days
+            elif frequency == "interval":
+                if start_date_str:
+                    start = date.fromisoformat(start_date_str)
+                    days_passed = (current_date - start).days
+                    should_remind = days_passed >= 0 and days_passed % interval_days == 0
+                else:
+                    should_remind = True
+
+            if should_remind:
+                result.append(row_dict)
+
         return result
 
 
@@ -391,6 +467,7 @@ async def get_user_today_schedule(user_id: int) -> list[dict]:
     """Get today's schedule for a user with intake status."""
     today = date.today()
     day_of_week = today.isoweekday()
+    day_of_month = today.day
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -411,9 +488,31 @@ async def get_user_today_schedule(user_id: int) -> list[dict]:
 
         result = []
         for row in rows:
+            row_dict = dict(row)
             days = json.loads(row["days"])
-            if day_of_week in days:
-                result.append(dict(row))
+            frequency = row["frequency"] or "daily"
+            interval_days = row["interval_days"] or 1
+            start_date_str = row["start_date"]
+
+            should_show = False
+
+            if frequency == "daily":
+                should_show = True
+            elif frequency == "weekly" or frequency == "specific_days":
+                should_show = day_of_week in days
+            elif frequency == "monthly":
+                should_show = day_of_month in days
+            elif frequency == "interval":
+                if start_date_str:
+                    start = date.fromisoformat(start_date_str)
+                    days_passed = (today - start).days
+                    should_show = days_passed >= 0 and days_passed % interval_days == 0
+                else:
+                    should_show = True
+
+            if should_show:
+                result.append(row_dict)
+
         return result
 
 
@@ -429,3 +528,78 @@ async def check_existing_log(schedule_id: int, scheduled_date: date) -> bool:
         )
         row = await cursor.fetchone()
         return row is not None
+
+
+async def update_reminder_count(log_id: int, reminder_time: datetime) -> bool:
+    """Update reminder count and last reminder time."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            UPDATE intake_logs
+            SET reminder_count = reminder_count + 1, last_reminder_at = ?
+            WHERE id = ?
+            """,
+            (reminder_time.isoformat(), log_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_logs_for_followup_reminder(hours_ago: int) -> list[dict]:
+    """Get pending logs that need follow-up reminder after N hours."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT il.*, s.time, s.pill_id, s.frequency, s.interval_days, s.start_date,
+                   p.name as pill_name, p.dosage, p.photo_id,
+                   u.telegram_id, u.chat_id, u.username, u.first_name
+            FROM intake_logs il
+            JOIN schedules s ON il.schedule_id = s.id
+            JOIN pills p ON s.pill_id = p.id
+            JOIN users u ON p.user_id = u.id
+            WHERE il.status = 'pending'
+              AND date(il.scheduled_time) = date('now')
+              AND (
+                  (il.reminder_count = 0 AND datetime(il.scheduled_time, '+' || ? || ' hours') <= datetime('now'))
+                  OR
+                  (il.reminder_count = 1 AND datetime(il.last_reminder_at, '+3 hours') <= datetime('now'))
+              )
+              AND il.reminder_count < 2
+            """,
+            (hours_ago,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def update_schedule_start_date(schedule_id: int, new_start_date: str) -> bool:
+    """Update schedule start_date (for interval-based schedules after confirmation)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE schedules SET start_date = ? WHERE id = ?",
+            (new_start_date, schedule_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_schedule_by_id(schedule_id: int) -> Optional[dict]:
+    """Get schedule by ID with full details."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT s.*, p.name as pill_name, p.dosage, p.photo_id,
+                   u.telegram_id, u.chat_id, u.username, u.first_name
+            FROM schedules s
+            JOIN pills p ON s.pill_id = p.id
+            JOIN users u ON p.user_id = u.id
+            WHERE s.id = ?
+            """,
+            (schedule_id,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            return dict(row)
+        return None

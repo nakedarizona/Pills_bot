@@ -13,6 +13,10 @@ class AddPillStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_dosage = State()
     waiting_for_photo = State()
+    waiting_for_frequency = State()
+    waiting_for_weekday = State()
+    waiting_for_monthday = State()
+    waiting_for_interval = State()
     waiting_for_time = State()
     waiting_for_custom_time = State()
 
@@ -59,15 +63,17 @@ async def cmd_help(message: Message):
     await message.answer(
         "<b>Как пользоваться ботом:</b>\n\n"
         "1. <b>/addpill</b> - добавить новую таблетку\n"
-        "   Бот спросит название, дозировку и время приёма\n\n"
+        "   Бот спросит название, дозировку, частоту и время приёма\n\n"
         "2. <b>/mypills</b> - посмотреть все твои таблетки с фото\n\n"
         "3. <b>/editpill</b> - изменить название, дозировку или фото\n\n"
         "4. <b>/today</b> - что нужно выпить сегодня\n\n"
         "5. <b>/deletepill</b> - удалить таблетку\n\n"
-        "<b>Как работают напоминания:</b>\n"
-        "- Бот напомнит в указанное время (часовой пояс: Dubai)\n"
-        "- Нажми кнопку когда выпьешь таблетку\n"
-        "- Если забудешь - вечером напомню ещё раз"
+        "<b>Частота приёма:</b>\n"
+        "- Ежедневно\n"
+        "- Через день (каждые 2, 3, N дней)\n"
+        "- Раз в неделю (выбрать день)\n"
+        "- Раз в месяц (выбрать число)\n\n"
+        "<b>Часовой пояс:</b> Dubai (UTC+4)"
     )
 
 
@@ -116,7 +122,7 @@ async def process_pill_photo(message: Message, state: FSMContext):
     """Process pill photo."""
     photo_id = message.photo[-1].file_id
     await state.update_data(photo_id=photo_id)
-    await show_time_selection(message, state)
+    await show_frequency_selection(message, state)
 
 
 @router.callback_query(AddPillStates.waiting_for_photo, F.data == "skip_photo")
@@ -124,7 +130,108 @@ async def skip_photo(callback: CallbackQuery, state: FSMContext):
     """Skip photo upload."""
     await state.update_data(photo_id=None)
     await callback.answer()
+    await show_frequency_selection(callback.message, state)
+
+
+async def show_frequency_selection(message: Message, state: FSMContext):
+    """Show frequency selection keyboard."""
+    await state.set_state(AddPillStates.waiting_for_frequency)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Ежедневно", callback_data="freq_daily")],
+            [InlineKeyboardButton(text="Через день", callback_data="freq_interval_2")],
+            [InlineKeyboardButton(text="Каждые N дней", callback_data="freq_interval_custom")],
+            [InlineKeyboardButton(text="Раз в неделю", callback_data="freq_weekly")],
+            [InlineKeyboardButton(text="Раз в месяц", callback_data="freq_monthly")],
+        ]
+    )
+    await message.answer("Как часто принимать?", reply_markup=keyboard)
+
+
+@router.callback_query(AddPillStates.waiting_for_frequency, F.data.startswith("freq_"))
+async def process_frequency_selection(callback: CallbackQuery, state: FSMContext):
+    """Process frequency selection."""
+    freq_data = callback.data.replace("freq_", "")
+
+    if freq_data == "daily":
+        await state.update_data(frequency="daily", days=[1, 2, 3, 4, 5, 6, 7], interval_days=1)
+        await callback.answer()
+        await show_time_selection(callback.message, state)
+
+    elif freq_data == "interval_2":
+        await state.update_data(frequency="interval", days=[], interval_days=2)
+        await callback.answer()
+        await show_time_selection(callback.message, state)
+
+    elif freq_data == "interval_custom":
+        await state.set_state(AddPillStates.waiting_for_interval)
+        await callback.message.answer("Введи количество дней между приёмами (например: 3):")
+        await callback.answer()
+
+    elif freq_data == "weekly":
+        await state.set_state(AddPillStates.waiting_for_weekday)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Пн", callback_data="weekday_1"),
+                    InlineKeyboardButton(text="Вт", callback_data="weekday_2"),
+                    InlineKeyboardButton(text="Ср", callback_data="weekday_3"),
+                    InlineKeyboardButton(text="Чт", callback_data="weekday_4"),
+                ],
+                [
+                    InlineKeyboardButton(text="Пт", callback_data="weekday_5"),
+                    InlineKeyboardButton(text="Сб", callback_data="weekday_6"),
+                    InlineKeyboardButton(text="Вс", callback_data="weekday_7"),
+                ],
+            ]
+        )
+        await callback.message.answer("Выбери день недели:", reply_markup=keyboard)
+        await callback.answer()
+
+    elif freq_data == "monthly":
+        await state.set_state(AddPillStates.waiting_for_monthday)
+        await callback.message.answer("Введи число месяца (1-31):")
+        await callback.answer()
+
+
+@router.message(AddPillStates.waiting_for_interval, F.text)
+async def process_interval_input(message: Message, state: FSMContext):
+    """Process custom interval input."""
+    try:
+        interval = int(message.text.strip())
+        if interval < 1 or interval > 365:
+            raise ValueError()
+    except ValueError:
+        await message.answer("Введи число от 1 до 365:")
+        return
+
+    await state.update_data(frequency="interval", days=[], interval_days=interval)
+    await show_time_selection(message, state)
+
+
+@router.callback_query(AddPillStates.waiting_for_weekday, F.data.startswith("weekday_"))
+async def process_weekday_selection(callback: CallbackQuery, state: FSMContext):
+    """Process weekday selection."""
+    weekday = int(callback.data.replace("weekday_", ""))
+    await state.update_data(frequency="weekly", days=[weekday], interval_days=1)
+    await callback.answer()
     await show_time_selection(callback.message, state)
+
+
+@router.message(AddPillStates.waiting_for_monthday, F.text)
+async def process_monthday_input(message: Message, state: FSMContext):
+    """Process month day input."""
+    try:
+        day = int(message.text.strip())
+        if day < 1 or day > 31:
+            raise ValueError()
+    except ValueError:
+        await message.answer("Введи число от 1 до 31:")
+        return
+
+    await state.update_data(frequency="monthly", days=[day], interval_days=1)
+    await show_time_selection(message, state)
 
 
 async def show_time_selection(message: Message, state: FSMContext):
@@ -143,7 +250,7 @@ async def show_time_selection(message: Message, state: FSMContext):
             ],
         ]
     )
-    await message.answer("Когда принимать таблетку?", reply_markup=keyboard)
+    await message.answer("В какое время напоминать?", reply_markup=keyboard)
 
 
 @router.callback_query(AddPillStates.waiting_for_time, F.data.startswith("time_"))
@@ -166,7 +273,6 @@ async def process_custom_time(message: Message, state: FSMContext):
     """Process custom time input."""
     time_str = message.text.strip()
 
-    # Validate time format
     try:
         parts = time_str.split(":")
         if len(parts) != 2:
@@ -193,16 +299,44 @@ async def save_pill(message: Message, state: FSMContext, time_str: str):
         photo_id=data.get("photo_id"),
     )
 
-    # Add schedule for all days of the week
-    await db.add_schedule(pill_id=pill.id, time=time_str, days=[1, 2, 3, 4, 5, 6, 7])
+    frequency = data.get("frequency", "daily")
+    days = data.get("days", [1, 2, 3, 4, 5, 6, 7])
+    interval_days = data.get("interval_days", 1)
+
+    schedule = await db.add_schedule(
+        pill_id=pill.id,
+        time=time_str,
+        days=days,
+        frequency=frequency,
+        interval_days=interval_days,
+    )
+
+    freq_text = get_frequency_text(frequency, days, interval_days)
 
     await state.clear()
     await message.answer(
         f"Таблетка добавлена!\n\n"
         f"<b>{pill.name}</b> ({pill.dosage})\n"
         f"Время приёма: {time_str}\n"
-        f"Дни: ежедневно"
+        f"Частота: {freq_text}"
     )
+
+
+def get_frequency_text(frequency: str, days: list[int], interval_days: int) -> str:
+    """Get human-readable frequency text."""
+    if frequency == "daily":
+        return "ежедневно"
+    elif frequency == "interval":
+        if interval_days == 2:
+            return "через день"
+        return f"каждые {interval_days} дн."
+    elif frequency == "weekly":
+        day_names = {1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс"}
+        days_str = ", ".join(day_names[d] for d in days)
+        return f"раз в неделю ({days_str})"
+    elif frequency == "monthly":
+        return f"раз в месяц ({days[0]} числа)" if days else "раз в месяц"
+    return frequency
 
 
 @router.message(Command("mypills"))
@@ -221,15 +355,22 @@ async def cmd_mypills(message: Message):
         )
         return
 
-    # Send each pill with photo if available
     for pill in pills:
         schedules = await db.get_pill_schedules(pill.id)
-        times = ", ".join(s.time for s in schedules) if schedules else "не задано"
+
+        if schedules:
+            schedule_lines = []
+            for s in schedules:
+                freq_text = get_frequency_text(s.frequency, s.days, s.interval_days)
+                schedule_lines.append(f"{s.time} ({freq_text})")
+            schedule_text = "\n".join(schedule_lines)
+        else:
+            schedule_text = "не задано"
 
         text = (
             f"<b>{pill.name}</b>\n"
             f"Дозировка: {pill.dosage}\n"
-            f"Время: {times}"
+            f"Расписание:\n{schedule_text}"
         )
 
         keyboard = InlineKeyboardMarkup(
@@ -424,7 +565,6 @@ async def process_delete_pill(callback: CallbackQuery):
         await callback.answer("Таблетка не найдена", show_alert=True)
         return
 
-    # Check ownership
     user = await db.get_user(callback.from_user.id, callback.message.chat.id)
     if not user or pill.user_id != user.id:
         await callback.answer("Это не твоя таблетка!", show_alert=True)

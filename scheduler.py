@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot
@@ -10,6 +10,9 @@ import database as db
 from config import TIMEZONE, EVENING_REMINDER_TIME
 
 logger = logging.getLogger(__name__)
+
+# Cutoff time for reminders (no reminders after this hour)
+REMINDER_CUTOFF_HOUR = 21
 
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -22,6 +25,15 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         CronTrigger(minute="*"),
         args=[bot],
         id="send_reminders",
+        replace_existing=True,
+    )
+
+    # Check for follow-up reminders every 15 minutes
+    scheduler.add_job(
+        send_followup_reminders,
+        CronTrigger(minute="*/15"),
+        args=[bot],
+        id="followup_reminders",
         replace_existing=True,
     )
 
@@ -38,19 +50,26 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     return scheduler
 
 
+def is_within_reminder_hours() -> bool:
+    """Check if current time is within allowed reminder hours (before 21:00)."""
+    now = datetime.now()
+    return now.hour < REMINDER_CUTOFF_HOUR
+
+
 async def send_reminders(bot: Bot):
     """Send reminders for current time."""
     now = datetime.now()
     current_time = now.strftime("%H:%M")
-    day_of_week = now.isoweekday()
+    current_date = date.today()
 
-    logger.debug(f"Checking reminders for {current_time}, day {day_of_week}")
+    logger.debug(f"Checking reminders for {current_time}, date {current_date}")
 
-    schedules = await db.get_schedules_for_time(current_time, day_of_week)
+    # Pass current_date instead of day_of_week
+    schedules = await db.get_schedules_for_time(current_time, current_date)
 
     for schedule in schedules:
         # Check if log already exists for today
-        if await db.check_existing_log(schedule["id"], date.today()):
+        if await db.check_existing_log(schedule["id"], current_date):
             continue
 
         # Create intake log
@@ -74,8 +93,8 @@ async def send_reminders(bot: Bot):
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="Выпил", callback_data=f"taken_{log.id}"),
-                    InlineKeyboardButton(text="Позже", callback_data=f"remind_later_{log.id}"),
+                    InlineKeyboardButton(text="✅ Выпил", callback_data=f"taken_{log.id}"),
+                    InlineKeyboardButton(text="❌ Нет", callback_data=f"not_taken_{log.id}"),
                 ]
             ]
         )
@@ -88,16 +107,91 @@ async def send_reminders(bot: Bot):
                     photo=schedule["photo_id"],
                     caption=text,
                     reply_markup=keyboard,
+                    parse_mode="HTML",
                 )
             else:
                 await bot.send_message(
                     chat_id=schedule["chat_id"],
                     text=text,
                     reply_markup=keyboard,
+                    parse_mode="HTML",
                 )
             logger.info(f"Sent reminder to chat {schedule['chat_id']} for {schedule['pill_name']}")
         except Exception as e:
             logger.error(f"Failed to send reminder: {e}")
+
+
+async def send_followup_reminders(bot: Bot):
+    """Send follow-up reminders for pills not taken after 3 and 6 hours."""
+    if not is_within_reminder_hours():
+        logger.debug("Outside reminder hours, skipping follow-up reminders")
+        return
+
+    now = datetime.now()
+    logger.debug("Checking follow-up reminders")
+
+    # Get logs that need 3-hour follow-up (reminder_count = 0)
+    logs_3h = await db.get_logs_for_followup_reminder(3)
+    # Get logs that need 6-hour follow-up (reminder_count = 1)
+    logs_6h = await db.get_logs_for_followup_reminder(6)
+
+    all_logs = logs_3h + logs_6h
+
+    for log in all_logs:
+        # Skip if already processed in this batch
+        reminder_num = log["reminder_count"] + 1
+
+        # Build mention
+        if log["username"]:
+            mention = f"@{log['username']}"
+        else:
+            mention = log["first_name"] or "Друг"
+
+        # Build message based on reminder number
+        if reminder_num == 1:
+            text = (
+                f"{mention}, напоминаю! Ты ещё не выпил таблетку:\n\n"
+                f"<b>{log['pill_name']}</b> ({log['dosage']})\n\n"
+                f"Прошло 3 часа с момента запланированного приёма."
+            )
+        else:
+            text = (
+                f"{mention}, последнее напоминание!\n\n"
+                f"<b>{log['pill_name']}</b> ({log['dosage']})\n\n"
+                f"Прошло 6 часов с момента запланированного приёма."
+            )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Выпил", callback_data=f"taken_{log['id']}"),
+                    InlineKeyboardButton(text="❌ Пропустил", callback_data=f"missed_{log['id']}"),
+                ]
+            ]
+        )
+
+        try:
+            if log.get("photo_id"):
+                await bot.send_photo(
+                    chat_id=log["chat_id"],
+                    photo=log["photo_id"],
+                    caption=text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+            else:
+                await bot.send_message(
+                    chat_id=log["chat_id"],
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML",
+                )
+
+            # Update reminder count
+            await db.update_reminder_count(log["id"], now)
+            logger.info(f"Sent follow-up reminder #{reminder_num} to chat {log['chat_id']} for {log['pill_name']}")
+        except Exception as e:
+            logger.error(f"Failed to send follow-up reminder: {e}")
 
 
 async def send_evening_reminders(bot: Bot):
@@ -163,11 +257,11 @@ async def send_evening_reminders(bot: Bot):
             for pill_log in data["pills"]:
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"Выпил {pill_log['pill_name']}",
+                        text=f"✅ Выпил {pill_log['pill_name']}",
                         callback_data=f"taken_{pill_log['id']}"
                     ),
                     InlineKeyboardButton(
-                        text="Пропустил",
+                        text="❌ Пропустил",
                         callback_data=f"missed_{pill_log['id']}"
                     ),
                 ])
@@ -179,6 +273,7 @@ async def send_evening_reminders(bot: Bot):
                     chat_id=chat_id,
                     text=text,
                     reply_markup=keyboard,
+                    parse_mode="HTML",
                 )
                 logger.info(f"Sent evening reminder to chat {chat_id} for user {telegram_id}")
 
