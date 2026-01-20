@@ -198,6 +198,37 @@ async def delete_pill(pill_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+async def update_pill(
+    pill_id: int,
+    name: Optional[str] = None,
+    dosage: Optional[str] = None,
+    photo_id: Optional[str] = None,
+) -> bool:
+    """Update pill fields."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        updates = []
+        params = []
+
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if dosage is not None:
+            updates.append("dosage = ?")
+            params.append(dosage)
+        if photo_id is not None:
+            updates.append("photo_id = ?")
+            params.append(photo_id)
+
+        if not updates:
+            return False
+
+        params.append(pill_id)
+        query = f"UPDATE pills SET {', '.join(updates)} WHERE id = ?"
+        cursor = await db.execute(query, params)
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 # Schedule operations
 async def add_schedule(
     pill_id: int, time: str, days: list[int]
