@@ -1,10 +1,25 @@
 from datetime import datetime, date
+import pytz
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
 import database as db
+from config import TIMEZONE
 
 router = Router()
+
+# Get timezone object
+TZ = pytz.timezone(TIMEZONE)
+
+
+def get_now():
+    """Get current datetime in configured timezone."""
+    return datetime.now(TZ)
+
+
+def get_today():
+    """Get current date in configured timezone."""
+    return get_now().date()
 
 
 @router.callback_query(F.data.startswith("taken_"))
@@ -43,32 +58,33 @@ async def confirm_taken(callback: CallbackQuery):
         await callback.answer("Уже отмечено как выпито!")
         return
 
-    await db.update_intake_status(log_id, "taken", datetime.now())
+    now = get_now()
+    await db.update_intake_status(log_id, "taken", now)
 
     # For interval-based schedules, update start_date to today
     # so the next reminder will be after interval_days from today
     if row["frequency"] == "interval":
-        today_str = date.today().isoformat()
+        today_str = get_today().isoformat()
         await db.update_schedule_start_date(row["schedule_id"], today_str)
 
     await callback.answer("Отлично! Отмечено как выпито.")
 
+    # Delete the message with photo and send new text message
+    chat_id = callback.message.chat.id
     try:
-        await callback.message.edit_text(
-            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-            f"✅ Выпито в {datetime.now().strftime('%H:%M')}",
+        await callback.message.delete()
+    except:
+        pass
+
+    try:
+        await callback.bot.send_message(
+            chat_id=chat_id,
+            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                 f"✅ Выпито в {now.strftime('%H:%M')}",
             parse_mode="HTML",
         )
     except:
-        # Message might have photo, try edit_caption
-        try:
-            await callback.message.edit_caption(
-                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                f"✅ Выпито в {datetime.now().strftime('%H:%M')}",
-                parse_mode="HTML",
-            )
-        except:
-            pass
+        pass
 
 
 @router.callback_query(F.data.startswith("missed_"))
@@ -109,21 +125,22 @@ async def confirm_missed(callback: CallbackQuery):
     await db.update_intake_status(log_id, "missed")
     await callback.answer("Отмечено как пропущено.")
 
+    # Delete the message with photo and send new text message
+    chat_id = callback.message.chat.id
     try:
-        await callback.message.edit_text(
-            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-            f"❌ Пропущено",
+        await callback.message.delete()
+    except:
+        pass
+
+    try:
+        await callback.bot.send_message(
+            chat_id=chat_id,
+            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                 f"❌ Пропущено",
             parse_mode="HTML",
         )
     except:
-        try:
-            await callback.message.edit_caption(
-                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                f"❌ Пропущено",
-                parse_mode="HTML",
-            )
-        except:
-            pass
+        pass
 
 
 @router.callback_query(F.data.startswith("not_taken_"))
@@ -164,21 +181,22 @@ async def not_taken_yet(callback: CallbackQuery):
     # Keep status as pending, the scheduler will send follow-up reminders
     await callback.answer("Хорошо, напомню позже!")
 
+    # Delete the message with photo and send new text message
+    chat_id = callback.message.chat.id
     try:
-        await callback.message.edit_text(
-            f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-            f"⏳ Напомню через 3 часа (до 21:00)",
+        await callback.message.delete()
+    except:
+        pass
+
+    try:
+        await callback.bot.send_message(
+            chat_id=chat_id,
+            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+                 f"⏳ Напомню через 3 часа (до 21:00)",
             parse_mode="HTML",
         )
     except:
-        try:
-            await callback.message.edit_caption(
-                f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                f"⏳ Напомню через 3 часа (до 21:00)",
-                parse_mode="HTML",
-            )
-        except:
-            pass
+        pass
 
 
 @router.callback_query(F.data.startswith("remind_later_"))
@@ -213,4 +231,9 @@ async def remind_later(callback: CallbackQuery):
         return
 
     await callback.answer("Напомню позже!")
-    await callback.message.edit_reply_markup(reply_markup=None)
+
+    # Delete the message with photo
+    try:
+        await callback.message.delete()
+    except:
+        pass

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, date, timedelta
+import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram import Bot
@@ -13,6 +14,19 @@ logger = logging.getLogger(__name__)
 
 # Cutoff time for reminders (no reminders after this hour)
 REMINDER_CUTOFF_HOUR = 21
+
+# Get timezone object
+TZ = pytz.timezone(TIMEZONE)
+
+
+def get_now():
+    """Get current datetime in configured timezone."""
+    return datetime.now(TZ)
+
+
+def get_today():
+    """Get current date in configured timezone."""
+    return get_now().date()
 
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
@@ -52,15 +66,15 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
 
 def is_within_reminder_hours() -> bool:
     """Check if current time is within allowed reminder hours (before 21:00)."""
-    now = datetime.now()
+    now = get_now()
     return now.hour < REMINDER_CUTOFF_HOUR
 
 
 async def send_reminders(bot: Bot):
     """Send reminders for current time."""
-    now = datetime.now()
+    now = get_now()
     current_time = now.strftime("%H:%M")
-    current_date = date.today()
+    current_date = get_today()
 
     logger.debug(f"Checking reminders for {current_time}, date {current_date}")
 
@@ -127,7 +141,7 @@ async def send_followup_reminders(bot: Bot):
         logger.debug("Outside reminder hours, skipping follow-up reminders")
         return
 
-    now = datetime.now()
+    now = get_now()
     logger.debug("Checking follow-up reminders")
 
     # Get logs that need 3-hour follow-up (reminder_count = 0)
@@ -202,7 +216,7 @@ async def send_evening_reminders(bot: Bot):
     import aiosqlite
     from config import DB_PATH
 
-    today = date.today().isoformat()
+    today = get_today().isoformat()
 
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
