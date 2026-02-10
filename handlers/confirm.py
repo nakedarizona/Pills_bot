@@ -69,20 +69,16 @@ async def confirm_taken(callback: CallbackQuery):
 
     await callback.answer("Отлично! Отмечено как выпито.")
 
-    # Delete the message with photo and send new text message
-    chat_id = callback.message.chat.id
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    result_text = (
+        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+        f"✅ Выпито в {now.strftime('%H:%M')}"
+    )
 
     try:
-        await callback.bot.send_message(
-            chat_id=chat_id,
-            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                 f"✅ Выпито в {now.strftime('%H:%M')}",
-            parse_mode="HTML",
-        )
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=result_text, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text=result_text, parse_mode="HTML")
     except:
         pass
 
@@ -125,20 +121,16 @@ async def confirm_missed(callback: CallbackQuery):
     await db.update_intake_status(log_id, "missed")
     await callback.answer("Отмечено как пропущено.")
 
-    # Delete the message with photo and send new text message
-    chat_id = callback.message.chat.id
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    result_text = (
+        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+        f"❌ Пропущено"
+    )
 
     try:
-        await callback.bot.send_message(
-            chat_id=chat_id,
-            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                 f"❌ Пропущено",
-            parse_mode="HTML",
-        )
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=result_text, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text=result_text, parse_mode="HTML")
     except:
         pass
 
@@ -181,20 +173,16 @@ async def not_taken_yet(callback: CallbackQuery):
     # Keep status as pending, the scheduler will send follow-up reminders
     await callback.answer("Хорошо, напомню позже!")
 
-    # Delete the message with photo and send new text message
-    chat_id = callback.message.chat.id
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    result_text = (
+        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
+        f"⏳ Напомню через 3 часа (до 21:00)"
+    )
 
     try:
-        await callback.bot.send_message(
-            chat_id=chat_id,
-            text=f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-                 f"⏳ Напомню через 3 часа (до 21:00)",
-            parse_mode="HTML",
-        )
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=result_text, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text=result_text, parse_mode="HTML")
     except:
         pass
 
@@ -232,8 +220,7 @@ async def remind_later(callback: CallbackQuery):
 
     await callback.answer("Напомню позже!")
 
-    # Delete the message with photo
     try:
-        await callback.message.delete()
+        await callback.message.edit_reply_markup(reply_markup=None)
     except:
         pass
