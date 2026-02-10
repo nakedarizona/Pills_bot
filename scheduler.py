@@ -42,10 +42,10 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # Check for follow-up reminders every 15 minutes
+    # Check for follow-up reminders every 5 minutes
     scheduler.add_job(
         send_followup_reminders,
-        CronTrigger(minute="*/15"),
+        CronTrigger(minute="*/5"),
         args=[bot],
         id="followup_reminders",
         replace_existing=True,
@@ -108,7 +108,7 @@ async def send_reminders(bot: Bot):
             inline_keyboard=[
                 [
                     InlineKeyboardButton(text="✅ Выпил", callback_data=f"taken_{log.id}"),
-                    InlineKeyboardButton(text="❌ Нет", callback_data=f"not_taken_{log.id}"),
+                    InlineKeyboardButton(text="❌ Пропустил", callback_data=f"missed_{log.id}"),
                 ]
             ]
         )
@@ -136,7 +136,7 @@ async def send_reminders(bot: Bot):
 
 
 async def send_followup_reminders(bot: Bot):
-    """Send follow-up reminders for pills not taken after 3 and 6 hours."""
+    """Send one follow-up reminder 1 hour after initial if no response."""
     if not is_within_reminder_hours():
         logger.debug("Outside reminder hours, skipping follow-up reminders")
         return
@@ -144,36 +144,19 @@ async def send_followup_reminders(bot: Bot):
     now = get_now()
     logger.debug("Checking follow-up reminders")
 
-    # Get logs that need 3-hour follow-up (reminder_count = 0)
-    logs_3h = await db.get_logs_for_followup_reminder(3)
-    # Get logs that need 6-hour follow-up (reminder_count = 1)
-    logs_6h = await db.get_logs_for_followup_reminder(6)
+    # Get logs that need 1-hour follow-up (reminder_count = 0, no response)
+    logs = await db.get_logs_for_followup_reminder(1)
 
-    all_logs = logs_3h + logs_6h
-
-    for log in all_logs:
-        # Skip if already processed in this batch
-        reminder_num = log["reminder_count"] + 1
-
-        # Build mention
+    for log in logs:
         if log["username"]:
             mention = f"@{log['username']}"
         else:
             mention = log["first_name"] or "Друг"
 
-        # Build message based on reminder number
-        if reminder_num == 1:
-            text = (
-                f"{mention}, напоминаю! Ты ещё не выпил таблетку:\n\n"
-                f"<b>{log['pill_name']}</b> ({log['dosage']})\n\n"
-                f"Прошло 3 часа с момента запланированного приёма."
-            )
-        else:
-            text = (
-                f"{mention}, последнее напоминание!\n\n"
-                f"<b>{log['pill_name']}</b> ({log['dosage']})\n\n"
-                f"Прошло 6 часов с момента запланированного приёма."
-            )
+        text = (
+            f"{mention}, напоминаю! Ты ещё не отметил приём:\n\n"
+            f"<b>{log['pill_name']}</b> ({log['dosage']})"
+        )
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -201,9 +184,8 @@ async def send_followup_reminders(bot: Bot):
                     parse_mode="HTML",
                 )
 
-            # Update reminder count
             await db.update_reminder_count(log["id"], now)
-            logger.info(f"Sent follow-up reminder #{reminder_num} to chat {log['chat_id']} for {log['pill_name']}")
+            logger.info(f"Sent follow-up reminder to chat {log['chat_id']} for {log['pill_name']}")
         except Exception as e:
             logger.error(f"Failed to send follow-up reminder: {e}")
 

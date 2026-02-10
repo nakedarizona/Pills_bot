@@ -546,7 +546,7 @@ async def update_reminder_count(log_id: int, reminder_time: datetime) -> bool:
 
 
 async def get_logs_for_followup_reminder(hours_ago: int) -> list[dict]:
-    """Get pending logs that need follow-up reminder after N hours."""
+    """Get pending logs that need one follow-up reminder after N hours (no response)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -560,12 +560,8 @@ async def get_logs_for_followup_reminder(hours_ago: int) -> list[dict]:
             JOIN users u ON p.user_id = u.id
             WHERE il.status = 'pending'
               AND date(il.scheduled_time) = date('now')
-              AND (
-                  (il.reminder_count = 0 AND datetime(il.scheduled_time, '+' || ? || ' hours') <= datetime('now'))
-                  OR
-                  (il.reminder_count = 1 AND datetime(il.last_reminder_at, '+3 hours') <= datetime('now'))
-              )
-              AND il.reminder_count < 2
+              AND il.reminder_count = 0
+              AND datetime(il.scheduled_time, '+' || ? || ' hours') <= datetime('now')
             """,
             (hours_ago,),
         )
