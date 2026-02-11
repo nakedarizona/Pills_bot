@@ -474,7 +474,7 @@ async def get_user_today_schedule(user_id: int) -> list[dict]:
         cursor = await db.execute(
             """
             SELECT s.*, p.name as pill_name, p.dosage, p.photo_id,
-                   il.id as log_id, il.status as intake_status
+                   il.id as log_id, il.status as intake_status, il.taken_at
             FROM schedules s
             JOIN pills p ON s.pill_id = p.id
             LEFT JOIN intake_logs il ON s.id = il.schedule_id
@@ -578,6 +578,32 @@ async def update_schedule_start_date(schedule_id: int, new_start_date: str) -> b
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def get_intake_logs_by_ids(log_ids: list[int]) -> list[dict]:
+    """Get intake logs with pill info by list of IDs."""
+    if not log_ids:
+        return []
+    placeholders = ",".join("?" * len(log_ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""
+            SELECT il.id, il.status, il.taken_at, il.schedule_id,
+                   p.name as pill_name, p.dosage,
+                   s.frequency, s.id as schedule_id,
+                   u.telegram_id
+            FROM intake_logs il
+            JOIN schedules s ON il.schedule_id = s.id
+            JOIN pills p ON s.pill_id = p.id
+            JOIN users u ON p.user_id = u.id
+            WHERE il.id IN ({placeholders})
+            ORDER BY il.id
+            """,
+            log_ids,
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
 
 async def get_schedule_by_id(schedule_id: int) -> Optional[dict]:

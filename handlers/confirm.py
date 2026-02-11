@@ -1,25 +1,101 @@
+import re
 from datetime import datetime, date
 import pytz
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 import database as db
 from config import TIMEZONE
 
 router = Router()
 
-# Get timezone object
 TZ = pytz.timezone(TIMEZONE)
 
 
 def get_now():
-    """Get current datetime in configured timezone."""
     return datetime.now(TZ)
 
 
 def get_today():
-    """Get current date in configured timezone."""
     return get_now().date()
+
+
+def extract_log_ids_from_markup(markup) -> list[int]:
+    """Extract all log IDs from inline keyboard buttons."""
+    log_ids = set()
+    if not markup or not markup.inline_keyboard:
+        return []
+    for row in markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data:
+                match = re.search(r"(?:taken|missed)_(\d+)", btn.callback_data)
+                if match:
+                    log_ids.add(int(match.group(1)))
+    return sorted(log_ids)
+
+
+def extract_log_ids_from_text(text: str) -> list[int]:
+    """Extract log IDs mentioned in the message text as a fallback."""
+    # This won't work - log IDs are only in buttons
+    return []
+
+
+async def rebuild_message(callback: CallbackQuery, current_log_id: int):
+    """Rebuild the grouped message with updated statuses."""
+    # Get all log IDs from the keyboard of the original message
+    log_ids = extract_log_ids_from_markup(callback.message.reply_markup)
+
+    # Also include the current log_id (might already be in list, but ensure it)
+    if current_log_id not in log_ids:
+        log_ids.append(current_log_id)
+        log_ids.sort()
+
+    # Fetch fresh data for all logs
+    logs = await db.get_intake_logs_by_ids(log_ids)
+    if not logs:
+        return
+
+    # Extract the header from original message (first line before the pill list)
+    original_text = callback.message.text or callback.message.caption or ""
+    first_line = original_text.split("\n")[0] if original_text else ""
+
+    # Build updated text
+    lines = [first_line, ""]
+    for log in logs:
+        status = log.get("status", "pending")
+        if status == "taken":
+            taken_at = log.get("taken_at", "")
+            time_str = ""
+            if taken_at:
+                try:
+                    t = datetime.fromisoformat(taken_at)
+                    time_str = t.strftime("%H:%M")
+                except:
+                    pass
+            suffix = f" — выпито в {time_str}" if time_str else ""
+            lines.append(f"✅ {log['pill_name']} ({log['dosage']}){suffix}")
+        elif status == "missed":
+            lines.append(f"❌ {log['pill_name']} ({log['dosage']}) — пропущено")
+        else:
+            lines.append(f"⏳ {log['pill_name']} ({log['dosage']})")
+
+    text = "\n".join(lines)
+
+    # Build keyboard only for still-pending pills
+    buttons = []
+    for log in logs:
+        if log.get("status", "pending") == "pending":
+            buttons.append([
+                InlineKeyboardButton(text=f"✅ {log['pill_name']}", callback_data=f"taken_{log['id']}"),
+                InlineKeyboardButton(text=f"❌ {log['pill_name']}", callback_data=f"missed_{log['id']}"),
+            ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+    try:
+        await callback.message.edit_text(text=text, reply_markup=keyboard, parse_mode="HTML")
+    except:
+        pass
 
 
 @router.callback_query(F.data.startswith("taken_"))
@@ -32,7 +108,6 @@ async def confirm_taken(callback: CallbackQuery):
         await callback.answer("Запись не найдена", show_alert=True)
         return
 
-    # Verify ownership through schedule -> pill -> user chain
     import aiosqlite
     from config import DB_PATH
 
@@ -61,26 +136,12 @@ async def confirm_taken(callback: CallbackQuery):
     now = get_now()
     await db.update_intake_status(log_id, "taken", now)
 
-    # For interval-based schedules, update start_date to today
-    # so the next reminder will be after interval_days from today
     if row["frequency"] == "interval":
         today_str = get_today().isoformat()
         await db.update_schedule_start_date(row["schedule_id"], today_str)
 
     await callback.answer("Отлично! Отмечено как выпито.")
-
-    result_text = (
-        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-        f"✅ Выпито в {now.strftime('%H:%M')}"
-    )
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=result_text, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text=result_text, parse_mode="HTML")
-    except:
-        pass
+    await rebuild_message(callback, log_id)
 
 
 @router.callback_query(F.data.startswith("missed_"))
@@ -120,18 +181,4 @@ async def confirm_missed(callback: CallbackQuery):
 
     await db.update_intake_status(log_id, "missed")
     await callback.answer("Отмечено как пропущено.")
-
-    result_text = (
-        f"<b>{row['name']}</b> ({row['dosage']})\n\n"
-        f"❌ Пропущено"
-    )
-
-    try:
-        if callback.message.photo:
-            await callback.message.edit_caption(caption=result_text, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text=result_text, parse_mode="HTML")
-    except:
-        pass
-
-
+    await rebuild_message(callback, log_id)

@@ -27,6 +27,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="editpill", description="Редактировать таблетку"),
         BotCommand(command="deletepill", description="Удалить таблетку"),
         BotCommand(command="today", description="Расписание на сегодня"),
+        BotCommand(command="status", description="Статус приёма таблеток"),
     ]
     await bot.set_my_commands(commands)
     logger.info("Bot commands registered")

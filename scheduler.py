@@ -70,73 +70,109 @@ def is_within_reminder_hours() -> bool:
     return now.hour < REMINDER_CUTOFF_HOUR
 
 
+def build_pills_text_and_keyboard(mention: str, pills: list[dict], header: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Build grouped message text and keyboard for a list of pills.
+
+    Each pill dict must have: id (log_id), pill_name, dosage, status.
+    Optional: taken_at.
+    """
+    lines = [f"{mention}, {header}\n"]
+
+    for p in pills:
+        status = p.get("status", "pending")
+        if status == "taken":
+            taken_at = p.get("taken_at", "")
+            if taken_at and isinstance(taken_at, str) and len(taken_at) >= 16:
+                try:
+                    t = datetime.fromisoformat(taken_at)
+                    time_str = t.strftime("%H:%M")
+                except:
+                    time_str = ""
+            else:
+                time_str = ""
+            suffix = f" — выпито в {time_str}" if time_str else ""
+            lines.append(f"✅ {p['pill_name']} ({p['dosage']}){suffix}")
+        elif status == "missed":
+            lines.append(f"❌ {p['pill_name']} ({p['dosage']}) — пропущено")
+        else:
+            lines.append(f"⏳ {p['pill_name']} ({p['dosage']})")
+
+    text = "\n".join(lines)
+
+    # Build keyboard only for pending pills
+    buttons = []
+    for p in pills:
+        if p.get("status", "pending") == "pending":
+            buttons.append([
+                InlineKeyboardButton(text=f"✅ {p['pill_name']}", callback_data=f"taken_{p['id']}"),
+                InlineKeyboardButton(text=f"❌ {p['pill_name']}", callback_data=f"missed_{p['id']}"),
+            ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    return text, keyboard
+
+
 async def send_reminders(bot: Bot):
-    """Send reminders for current time."""
+    """Send reminders for current time, grouped by user."""
     now = get_now()
     current_time = now.strftime("%H:%M")
     current_date = get_today()
 
     logger.debug(f"Checking reminders for {current_time}, date {current_date}")
 
-    # Pass current_date instead of day_of_week
     schedules = await db.get_schedules_for_time(current_time, current_date)
 
+    # Create logs and group by (chat_id, telegram_id)
+    user_pills = {}
     for schedule in schedules:
-        # Check if log already exists for today
         if await db.check_existing_log(schedule["id"], current_date):
             continue
 
-        # Create intake log
         log = await db.create_intake_log(
             schedule_id=schedule["id"],
             scheduled_time=now,
         )
 
-        # Build mention
-        if schedule["username"]:
-            mention = f"@{schedule['username']}"
+        key = (schedule["chat_id"], schedule["telegram_id"])
+        if key not in user_pills:
+            user_pills[key] = {
+                "chat_id": schedule["chat_id"],
+                "username": schedule["username"],
+                "first_name": schedule["first_name"],
+                "pills": [],
+            }
+        user_pills[key]["pills"].append({
+            "id": log.id,
+            "pill_name": schedule["pill_name"],
+            "dosage": schedule["dosage"],
+            "status": "pending",
+        })
+
+    # Send one message per user
+    for key, data in user_pills.items():
+        if data["username"]:
+            mention = f"@{data['username']}"
         else:
-            mention = schedule["first_name"] or "Друг"
+            mention = data["first_name"] or "Друг"
 
-        # Build message
-        text = (
-            f"{mention}, пора выпить таблетку!\n\n"
-            f"<b>{schedule['pill_name']}</b> ({schedule['dosage']})"
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Выпил", callback_data=f"taken_{log.id}"),
-                    InlineKeyboardButton(text="❌ Пропустил", callback_data=f"missed_{log.id}"),
-                ]
-            ]
-        )
+        header = "пора выпить таблетки!" if len(data["pills"]) > 1 else "пора выпить таблетку!"
+        text, keyboard = build_pills_text_and_keyboard(mention, data["pills"], header)
 
         try:
-            # Send photo if available
-            if schedule.get("photo_id"):
-                await bot.send_photo(
-                    chat_id=schedule["chat_id"],
-                    photo=schedule["photo_id"],
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-            else:
-                await bot.send_message(
-                    chat_id=schedule["chat_id"],
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-            logger.info(f"Sent reminder to chat {schedule['chat_id']} for {schedule['pill_name']}")
+            await bot.send_message(
+                chat_id=data["chat_id"],
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            pill_names = ", ".join(p["pill_name"] for p in data["pills"])
+            logger.info(f"Sent reminder to chat {data['chat_id']} for {pill_names}")
         except Exception as e:
             logger.error(f"Failed to send reminder: {e}")
 
 
 async def send_followup_reminders(bot: Bot):
-    """Send one follow-up reminder 1 hour after initial if no response."""
+    """Send one follow-up reminder 1 hour after initial if no response, grouped by user."""
     if not is_within_reminder_hours():
         logger.debug("Outside reminder hours, skipping follow-up reminders")
         return
@@ -144,57 +180,54 @@ async def send_followup_reminders(bot: Bot):
     now = get_now()
     logger.debug("Checking follow-up reminders")
 
-    # Get logs that need 1-hour follow-up (reminder_count = 0, no response)
     logs = await db.get_logs_for_followup_reminder(1)
 
+    # Group by (chat_id, telegram_id)
+    user_logs = {}
     for log in logs:
-        if log["username"]:
-            mention = f"@{log['username']}"
+        key = (log["chat_id"], log["telegram_id"])
+        if key not in user_logs:
+            user_logs[key] = {
+                "chat_id": log["chat_id"],
+                "username": log["username"],
+                "first_name": log["first_name"],
+                "pills": [],
+                "log_ids": [],
+            }
+        user_logs[key]["pills"].append({
+            "id": log["id"],
+            "pill_name": log["pill_name"],
+            "dosage": log["dosage"],
+            "status": "pending",
+        })
+        user_logs[key]["log_ids"].append(log["id"])
+
+    for key, data in user_logs.items():
+        if data["username"]:
+            mention = f"@{data['username']}"
         else:
-            mention = log["first_name"] or "Друг"
+            mention = data["first_name"] or "Друг"
 
-        text = (
-            f"{mention}, напоминаю! Ты ещё не отметил приём:\n\n"
-            f"<b>{log['pill_name']}</b> ({log['dosage']})"
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Выпил", callback_data=f"taken_{log['id']}"),
-                    InlineKeyboardButton(text="❌ Пропустил", callback_data=f"missed_{log['id']}"),
-                ]
-            ]
-        )
+        text, keyboard = build_pills_text_and_keyboard(mention, data["pills"], "напоминаю! Ты ещё не отметил приём:")
 
         try:
-            if log.get("photo_id"):
-                await bot.send_photo(
-                    chat_id=log["chat_id"],
-                    photo=log["photo_id"],
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-            else:
-                await bot.send_message(
-                    chat_id=log["chat_id"],
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-
-            await db.update_reminder_count(log["id"], now)
-            logger.info(f"Sent follow-up reminder to chat {log['chat_id']} for {log['pill_name']}")
+            await bot.send_message(
+                chat_id=data["chat_id"],
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            for log_id in data["log_ids"]:
+                await db.update_reminder_count(log_id, now)
+            logger.info(f"Sent follow-up reminder to chat {data['chat_id']}")
         except Exception as e:
             logger.error(f"Failed to send follow-up reminder: {e}")
 
 
 async def send_evening_reminders(bot: Bot):
-    """Send reminders for pills not taken today."""
+    """Send reminders for pills not taken today, grouped by user."""
     logger.info("Running evening reminders check")
 
-    # Get all unique chat_ids that have pending logs
     import aiosqlite
     from config import DB_PATH
 
@@ -229,7 +262,12 @@ async def send_evening_reminders(bot: Bot):
                     "first_name": log["first_name"],
                     "pills": [],
                 }
-            user_logs[user_key]["pills"].append(log)
+            user_logs[user_key]["pills"].append({
+                "id": log["id"],
+                "pill_name": log["pill_name"],
+                "dosage": log["dosage"],
+                "status": "pending",
+            })
 
         for telegram_id, data in user_logs.items():
             if data["username"]:
@@ -237,32 +275,9 @@ async def send_evening_reminders(bot: Bot):
             else:
                 mention = data["first_name"] or "Друг"
 
-            pills_text = "\n".join(
-                f"• {p['pill_name']} ({p['dosage']}) - {p['time']}"
-                for p in data["pills"]
+            text, keyboard = build_pills_text_and_keyboard(
+                mention, data["pills"], "ты не отметил приём таблеток сегодня:"
             )
-
-            text = (
-                f"{mention}, ты не отметил приём таблеток сегодня:\n\n"
-                f"{pills_text}\n\n"
-                "Выпил?"
-            )
-
-            # Create buttons for each pill
-            buttons = []
-            for pill_log in data["pills"]:
-                buttons.append([
-                    InlineKeyboardButton(
-                        text=f"✅ Выпил {pill_log['pill_name']}",
-                        callback_data=f"taken_{pill_log['id']}"
-                    ),
-                    InlineKeyboardButton(
-                        text="❌ Пропустил",
-                        callback_data=f"missed_{pill_log['id']}"
-                    ),
-                ])
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
             try:
                 await bot.send_message(
@@ -273,8 +288,7 @@ async def send_evening_reminders(bot: Bot):
                 )
                 logger.info(f"Sent evening reminder to chat {chat_id} for user {telegram_id}")
 
-                # Update status to reminded
-                for pill_log in data["pills"]:
-                    await db.update_intake_status(pill_log["id"], "reminded")
+                for pill in data["pills"]:
+                    await db.update_intake_status(pill["id"], "reminded")
             except Exception as e:
                 logger.error(f"Failed to send evening reminder: {e}")

@@ -601,3 +601,42 @@ async def cmd_today(message: Message):
         text += f"{status_emoji} {item['time']} - <b>{item['pill_name']}</b> ({item['dosage']})\n"
 
     await message.answer(text)
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message):
+    """Show intake status for today."""
+    user = await db.get_user(message.from_user.id, message.chat.id)
+    if not user:
+        await message.answer("Сначала используй /start для регистрации.")
+        return
+
+    schedule = await db.get_user_today_schedule(user.id)
+    if not schedule:
+        await message.answer("На сегодня ничего не запланировано.")
+        return
+
+    taken_count = sum(1 for s in schedule if s.get("intake_status") == "taken")
+    total_count = len(schedule)
+
+    text = f"<b>Статус приёма ({taken_count}/{total_count}):</b>\n\n"
+    for item in schedule:
+        status = item.get("intake_status")
+        if status == "taken":
+            taken_at = item.get("taken_at", "")
+            time_str = ""
+            if taken_at:
+                try:
+                    from datetime import datetime
+                    t = datetime.fromisoformat(taken_at)
+                    time_str = t.strftime("%H:%M")
+                except:
+                    pass
+            suffix = f" — выпито в {time_str}" if time_str else ""
+            text += f"✅ {item['time']} - <b>{item['pill_name']}</b> ({item['dosage']}){suffix}\n"
+        elif status == "missed":
+            text += f"❌ {item['time']} - <b>{item['pill_name']}</b> ({item['dosage']}) — пропущено\n"
+        else:
+            text += f"⏳ {item['time']} - <b>{item['pill_name']}</b> ({item['dosage']}) — ожидает\n"
+
+    await message.answer(text)
