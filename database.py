@@ -320,6 +320,57 @@ async def get_pill_schedules(pill_id: int) -> list[Schedule]:
         ]
 
 
+async def get_schedules_for_time_range(time_from: str, time_to: str, current_date: date) -> list[dict]:
+    """Get all active schedules for today within a time range (inclusive)."""
+    day_of_week = current_date.isoweekday()
+    day_of_month = current_date.day
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT s.*, p.name as pill_name, p.dosage, p.photo_id,
+                   u.telegram_id, u.chat_id, u.username, u.first_name
+            FROM schedules s
+            JOIN pills p ON s.pill_id = p.id
+            JOIN users u ON p.user_id = u.id
+            WHERE s.time >= ? AND s.time <= ? AND s.is_active = 1
+            ORDER BY s.time
+            """,
+            (time_from, time_to),
+        )
+        rows = await cursor.fetchall()
+
+        result = []
+        for row in rows:
+            row_dict = dict(row)
+            days = json.loads(row["days"])
+            frequency = row["frequency"] or "daily"
+            interval_days = row["interval_days"] or 1
+            start_date_str = row["start_date"]
+
+            should_remind = False
+
+            if frequency == "daily":
+                should_remind = True
+            elif frequency == "weekly" or frequency == "specific_days":
+                should_remind = day_of_week in days
+            elif frequency == "monthly":
+                should_remind = day_of_month in days
+            elif frequency == "interval":
+                if start_date_str:
+                    start = date.fromisoformat(start_date_str)
+                    days_passed = (current_date - start).days
+                    should_remind = days_passed >= 0 and days_passed % interval_days == 0
+                else:
+                    should_remind = True
+
+            if should_remind:
+                result.append(row_dict)
+
+        return result
+
+
 async def get_schedules_for_time(time_str: str, current_date: date) -> list[dict]:
     """Get all active schedules for a specific time and date."""
     day_of_week = current_date.isoweekday()
