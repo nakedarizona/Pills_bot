@@ -31,19 +31,19 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """Setup scheduler with 2 daily reminders."""
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
-    # Morning reminder at 8:00
+    # Morning reminder at 8:00 Dubai time
     scheduler.add_job(
         send_morning_reminder,
-        CronTrigger(hour=MORNING_HOUR, minute=0),
+        CronTrigger(hour=MORNING_HOUR, minute=0, timezone=TZ),
         args=[bot],
         id="morning_reminder",
         replace_existing=True,
     )
 
-    # Evening reminder at 20:00
+    # Evening reminder at 20:00 Dubai time
     scheduler.add_job(
         send_evening_reminder,
-        CronTrigger(hour=EVENING_HOUR, minute=0),
+        CronTrigger(hour=EVENING_HOUR, minute=0, timezone=TZ),
         args=[bot],
         id="evening_reminder",
         replace_existing=True,
